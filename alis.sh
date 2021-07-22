@@ -93,6 +93,7 @@ function sanitize_variables() {
     SWAP_SIZE=$(sanitize_variable "$SWAP_SIZE")
     KERNELS=$(sanitize_variable "$KERNELS")
     KERNELS_COMPRESSION=$(sanitize_variable "$KERNELS_COMPRESSION")
+    KERNELS_PARAMETERS=$(sanitize_variable "$KERNELS_PARAMETERS")
     SYSTEMD_HOMED_STORAGE=$(sanitize_variable "$SYSTEMD_HOMED_STORAGE")
     BOOTLOADER=$(sanitize_variable "$BOOTLOADER")
     CUSTOM_SHELL=$(sanitize_variable "$CUSTOM_SHELL")
@@ -170,7 +171,7 @@ function check_variables() {
     check_variables_value "HOOKS" "$HOOKS"
     check_variables_list "BOOTLOADER" "$BOOTLOADER" "grub refind systemd"
     check_variables_list "CUSTOM_SHELL" "$CUSTOM_SHELL" "bash zsh dash fish"
-    check_variables_list "DESKTOP_ENVIRONMENT" "$DESKTOP_ENVIRONMENT" "gnome kde xfce mate cinnamon lxde i3-wm i3-gaps" "false"
+    check_variables_list "DESKTOP_ENVIRONMENT" "$DESKTOP_ENVIRONMENT" "gnome kde xfce mate cinnamon lxde i3-wm i3-gaps deepin" "false"
     check_variables_boolean "PACKAGES_MULTILIB" "$PACKAGES_MULTILIB"
     check_variables_boolean "PACKAGES_INSTALL" "$PACKAGES_INSTALL"
     check_variables_boolean "VAGRANT" "$VAGRANT"
@@ -657,12 +658,12 @@ function install() {
     fi
 
     sed -i 's/#Color/Color/' /etc/pacman.conf
-    sed -i 's/#TotalDownload/TotalDownload/' /etc/pacman.conf
+    sed -i 's/#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf
 
     pacstrap /mnt base base-devel linux linux-firmware
 
     sed -i 's/#Color/Color/' /mnt/etc/pacman.conf
-    sed -i 's/#TotalDownload/TotalDownload/' /mnt/etc/pacman.conf
+    sed -i 's/#ParallelDownloads/ParallelDownloads/' /mnt/etc/pacman.conf
 
     if [ "$PACKAGES_MULTILIB" == "true" ]; then
         echo "" >> /mnt/etc/pacman.conf
@@ -744,25 +745,25 @@ function mkinitcpio_configuration() {
     print_step "mkinitcpio_configuration()"
 
     if [ "$KMS" == "true" ]; then
-        MODULES=""
+        MKINITCPIO_KMS_MODULES=""
         case "$DISPLAY_DRIVER" in
             "intel" )
-                MODULES="i915"
+                MKINITCPIO_KMS_MODULES="i915"
                 ;;
             "nvidia" | "nvidia-lts"  | "nvidia-dkms" | "nvidia-390xx" | "nvidia-390xx-lts" | "nvidia-390xx-dkms" )
-                MODULES="nvidia nvidia_modeset nvidia_uvm nvidia_drm"
+                MKINITCPIO_KMS_MODULES="nvidia nvidia_modeset nvidia_uvm nvidia_drm"
                 ;;
             "amdgpu" )
-                MODULES="amdgpu"
+                MKINITCPIO_KMS_MODULES="amdgpu"
                 ;;
             "ati" )
-                MODULES="radeon"
+                MKINITCPIO_KMS_MODULES="radeon"
                 ;;
             "nouveau" )
-                MODULES="nouveau"
+                MKINITCPIO_KMS_MODULES="nouveau"
                 ;;
         esac
-        arch-chroot /mnt sed -i "s/^MODULES=()/MODULES=($MODULES)/" /etc/mkinitcpio.conf
+        MODULES="$MODULES $MKINITCPIO_KMS_MODULES"
     fi
     if [ "$DISPLAY_DRIVER" == "intel" ]; then
         OPTIONS=""
@@ -811,8 +812,11 @@ function mkinitcpio_configuration() {
             HOOKS=$(echo $HOOKS | sed 's/!encrypt/encrypt/')
         fi
     fi
+
     HOOKS=$(sanitize_variable "$HOOKS")
+    MODULES=$(sanitize_variable "$MODULES")
     arch-chroot /mnt sed -i "s/^HOOKS=(.*)$/HOOKS=($HOOKS)/" /etc/mkinitcpio.conf
+    arch-chroot /mnt sed -i "s/^MODULES=(.*)/MODULES=($MODULES)/" /etc/mkinitcpio.conf
 
     if [ "$KERNELS_COMPRESSION" != "" ]; then
         arch-chroot /mnt sed -i 's/^#COMPRESSION="'"$KERNELS_COMPRESSION"'"/COMPRESSION="'"$KERNELS_COMPRESSION"'"/' /etc/mkinitcpio.conf
@@ -1537,6 +1541,9 @@ function desktop_environment() {
         "i3-gaps" )
             desktop_environment_i3_gaps
             ;;
+        "deepin" )
+            desktop_environment_deepin
+            ;;
     esac
 
     arch-chroot /mnt systemctl set-default graphical.target
@@ -1579,6 +1586,11 @@ function desktop_environment_i3_wm() {
 
 function desktop_environment_i3_gaps() {
     pacman_install "i3-gaps i3blocks i3lock i3status dmenu rxvt-unicode lightdm lightdm-gtk-greeter xorg-server"
+    arch-chroot /mnt systemctl enable lightdm.service
+}
+
+function desktop_environment_deepin() {
+    pacman_install "deepin deepin-extra"
     arch-chroot /mnt systemctl enable lightdm.service
 }
 

@@ -1,5 +1,9 @@
 # alis
 
+![Arch Linux](https://img.shields.io/badge/-ArchLinux-black?logo=arch-linux)
+![Bash](https://img.shields.io/badge/sh-bash-black)
+[![Donate](https://img.shields.io/badge/-Donate-yellow?logo=paypal)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=3PF47D5TSNL7C&currency_code=EUR)
+
 Arch Linux Install Script (or alis) installs unattended, automated and customized Arch Linux system.
 
 It is a simple bash script that fully automates the installation of a Arch Linux system after booting from the original Arch Linux installation media. It contains the same commands that you would type and execute one by one interactively to complete the installation. The only user intervention needed is to edit a configuration file to choose the installation options and preferences from partitioning, to encryption, bootloader, file system, language and keyboard mapping, desktop environment, kernels, packages to install and graphic drivers. This automation makes the installation easy and fast.
@@ -29,7 +33,7 @@ For new features, improvements and bugs fill an issue in GitHub or make a pull r
 * [Packages installation](https://github.com/picodotdev/alis#packages-installation)
 * [Recovery](https://github.com/picodotdev/alis#recovery)
 * [How you can help](https://github.com/picodotdev/alis#how-you-can-help)
-* [Test in VirtualBox with Packer](https://github.com/picodotdev/alis#test-in-virtuabox-with-packer)
+* [Test in VirtualBox with Packer](https://github.com/picodotdev/alis#test-in-virtualbox-with-packer)
 * [Video](https://github.com/picodotdev/alis#video)
 * [Arch Linux Installation Media](https://github.com/picodotdev/alis#arch-linux-installation-media)
 * [Reference](https://github.com/picodotdev/alis#reference)
@@ -56,7 +60,7 @@ If you find useful this script, you can support me with a [small donation](https
 * **Partition**: no LVM, LVM, LVM on LUKS, GPT on UEFI, MBR on BIOS
 * **File system**: ext4, btrfs (with subvols), xfs, f2fs, reiserfs
 * **Kernels**: linux, linux-lts, linux-hardened, linux-zen
-* **Desktop environment**: GNOME, KDE, XFCE, Mate, Cinnamon, LXDE, i3-wm, i3-gaps
+* **Desktop environment**: GNOME, KDE, XFCE, Mate, Cinnamon, LXDE, i3-wm, i3-gaps, Deepin
 * **Display managers**: GDM, SDDM, Lightdm, lxdm
 * **Graphics controller**: intel, nvidia and amd with optionally early KMS start. With intel optionally fastboot, hardware video acceleration and framebuffer compression.
 * **Bootloader**: GRUB, rEFInd, systemd-boot
@@ -171,7 +175,7 @@ $ ./alis-packer.sh -c alis-packer-efi-ext4-grub-xfce.sh
 
 ### Video
 
-[![asciicast](https://asciinema.org/a/192880.png)](https://asciinema.org/a/192880)
+[![asciicast](https://asciinema.org/a/418524.png)](https://asciinema.org/a/418524)
 
 ### Arch Linux Installation Media
 
@@ -233,5 +237,6 @@ https://www.archlinux.org/download/
 * https://wiki.archlinux.org/index.php/KDE
 * https://wiki.archlinux.org/index.php/Xfce
 * https://wiki.archlinux.org/index.php/I3
+* https://wiki.archlinux.org/title/Deepin_Desktop_Environment
 * http://tldp.org/LDP/Bash-Beginners-Guide/html/
 * http://tldp.org/LDP/abs/html/
