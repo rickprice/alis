@@ -112,6 +112,13 @@ function sanitize_variable() {
     echo "$VARIABLE"
 }
 
+function trim_variable() {
+    VARIABLE=$1
+    VARIABLE=$(echo $VARIABLE | sed 's/^[[:space:]]*//') # trim leading
+    VARIABLE=$(echo $VARIABLE | sed 's/[[:space:]]*$//') # trim trailing
+    echo "$VARIABLE"
+}
+
 function check_variables() {
     check_variables_value "KEYS" "$KEYS"
     check_variables_boolean "LOG" "$LOG"
@@ -334,16 +341,32 @@ function configure_time() {
 }
 
 function prepare_partition() {
-    if [ -d /mnt/boot ]; then
+    set +e
+    mountpoint -q /mnt/boot
+    if [ $? == 0 ]; then
         umount /mnt/boot
+    fi
+    mountpoint -q /mnt
+    if [ $? == 0 ]; then
         umount /mnt
     fi
     if [ -e "/dev/mapper/$LVM_VOLUME_GROUP-$LVM_VOLUME_LOGICAL" ]; then
-        umount "/dev/mapper/$LVM_VOLUME_GROUP-$LVM_VOLUME_LOGICAL"
+        if [ -e "/dev/mapper/$LUKS_DEVICE_NAME" ]; then
+            DEVICE_LVM="/dev/mapper/$LUKS_DEVICE_NAME"
+        else
+            DEVICE_LVM="$DEVICE_ROOT"
+        fi
+        lvchange -an "$LVM_VOLUME_GROUP/$LVM_VOLUME_LOGICAL"
+        lvremove $LVM_VOLUME_GROUP
+        vgchange -an $LVM_VOLUME_GROUP
+        vgremove $LVM_VOLUME_GROUP
+        pvremove $DEVICE_LVM
     fi
-    if [ -e "/dev/mapper/$LUKS_DEVICE_NAME" ]; then
-        cryptsetup close $LUKS_DEVICE_NAME
+    cryptsetup status "/dev/mapper/$LUKS_DEVICE_NAME" | grep -qi "is active"
+    if [ $? == 0 ]; then
+        cryptsetup close "/dev/mapper/$LUKS_DEVICE_NAME"
     fi
+    set -e
 }
 
 function ask_passwords() {
@@ -449,7 +472,7 @@ function configure_network() {
 function partition() {
     print_step "partition()"
 
-    partprobe $DEVICE
+    partprobe -s $DEVICE
 
     # setup
     if [ "$PARTITION_MODE" == "auto" ]; then
@@ -522,8 +545,9 @@ function partition() {
     # partition
     if [ "$PARTITION_MODE" == "auto" ]; then
         sgdisk --zap-all $DEVICE
+        sgdisk -o $DEVICE
         wipefs -a -f $DEVICE
-        partprobe $DEVICE
+        partprobe -s $DEVICE
     fi
 
     if [ "$PARTITION_MODE" == "auto" -o "$PARTITION_MODE" == "custom" ]; then
@@ -540,7 +564,7 @@ function partition() {
             parted -s $DEVICE $PARTITION_PARTED_BIOS
         fi
 
-        partprobe $DEVICE
+        partprobe -s $DEVICE
     fi
 
     # luks and lvm
@@ -1031,18 +1055,24 @@ function virtualbox() {
     else
         pacman_install "virtualbox-guest-utils virtualbox-guest-dkms"
     fi
+    arch-chroot /mnt systemctl enable vboxservice.service
 }
 
 function users() {
     print_step "users()"
 
-    create_user "$USER_NAME" "$USER_PASSWORD"
+    USERS_GROUPS="wheel,storage,optical"
+    if [ "$VIRTUALBOX" == "true" ]; then
+        USERS_GROUPS="${USERS_GROUPS},vboxsf"
+    fi
+
+    create_user "$USER_NAME" "$USER_PASSWORD" "$USERS_GROUPS"
 
     for U in ${ADDITIONAL_USERS[@]}; do
         IFS='=' S=(${U})
         USER=${S[0]}
         PASSWORD=${S[1]}
-        create_user "${USER}" "${PASSWORD}"
+        create_user "$USER" "$PASSWORD" "$USERS_GROUPS"
     done
 
 	arch-chroot /mnt sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
@@ -1050,6 +1080,8 @@ function users() {
     pacman_install "xdg-user-dirs"
 
     if [ "$SYSTEMD_HOMED" == "true" ]; then
+        arch-chroot /mnt systemctl enable systemd-homed.service
+
         cat <<EOT > "/mnt/etc/pam.d/nss-auth"
 #%PAM-1.0
 
@@ -1091,18 +1123,18 @@ EOT
 function create_user() {
     USER=$1
     PASSWORD=$2
+    USERS_GROUPS=$3
     if [ "$SYSTEMD_HOMED" == "true" ]; then
-        arch-chroot /mnt systemctl enable systemd-homed.service
-        create_user_homectl $USER $PASSWORD
-#       create_user_useradd $USER $PASSWORD
+        create_user_homectl "$USER" "$PASSWORD" "$USERS_GROUPS"
     else
-        create_user_useradd $USER $PASSWORD
+        create_user_useradd "$USER" "$PASSWORD" "$USERS_GROUPS"
     fi
 }
 
 function create_user_homectl() {
     USER=$1
     PASSWORD=$2
+    USERS_GROUPS=$3
     STORAGE=""
     CIFS_DOMAIN=""
     CIFS_USERNAME=""
@@ -1128,8 +1160,8 @@ function create_user_homectl() {
     ### after install and reboot this commands work
     systemctl start systemd-homed.service
     set +e
-    homectl create "$USER" --enforce-password-policy=no --timezone=$TZ --language=$L $STORAGE $CIFS_DOMAIN $CIFS_USERNAME $CIFS_SERVICE -G wheel,storage,optical
-    homectl activate "$USER"
+    homectl create $USER --enforce-password-policy=no --timezone=$TZ --language=$L $STORAGE $CIFS_DOMAIN $CIFS_USERNAME $CIFS_SERVICE -G "$USERS_GROUPS"
+    homectl activate $USER
     set -e
     cp -a "$IMAGE_PATH/." "/mnt$IMAGE_PATH"
     cp -a "$HOME_PATH/." "/mnt$HOME_PATH"
@@ -1139,7 +1171,8 @@ function create_user_homectl() {
 function create_user_useradd() {
     USER=$1
     PASSWORD=$2
-    arch-chroot /mnt useradd -m -G wheel,storage,optical -s /bin/bash $USER
+    USERS_GROUPS=$3
+    arch-chroot /mnt useradd -m -G "$USERS_GROUPS" -s /bin/bash $USER
     printf "$PASSWORD\n$PASSWORD" | arch-chroot /mnt passwd $USER
 }
 
@@ -1156,16 +1189,32 @@ function bootloader() {
             pacman_install "amd-ucode"
         fi
     fi
-    if [ "$LVM" == "true" ]; then
+    if [ "$LVM" == "true" -o -n "$LUKS_PASSWORD" ]; then
         CMDLINE_LINUX_ROOT="root=$DEVICE_ROOT"
     else
-        CMDLINE_LINUX_ROOT="root=PARTUUID=$PARTUUID_ROOT"
+        CMDLINE_LINUX_ROOT="root=UUID=$UUID_ROOT"
     fi
     if [ -n "$LUKS_PASSWORD" ]; then
-        if [ "$DEVICE_TRIM" == "true" ]; then
-            BOOTLOADER_ALLOW_DISCARDS=":allow-discards"
-        fi
-        CMDLINE_LINUX="cryptdevice=PARTUUID=$PARTUUID_ROOT:$LUKS_DEVICE_NAME$BOOTLOADER_ALLOW_DISCARDS"
+        case "$BOOTLOADER" in
+            "grub" )
+                if [ "$DEVICE_TRIM" == "true" ]; then
+                    BOOTLOADER_ALLOW_DISCARDS=":allow-discards"
+                fi
+                CMDLINE_LINUX="cryptdevice=UUID=$UUID_ROOT:$LUKS_DEVICE_NAME$BOOTLOADER_ALLOW_DISCARDS"
+                ;;
+            "refind" )
+                if [ "$DEVICE_TRIM" == "true" ]; then
+                    BOOTLOADER_ALLOW_DISCARDS=":allow-discards"
+                fi
+                CMDLINE_LINUX="cryptdevice=UUID=$UUID_ROOT:$LUKS_DEVICE_NAME$BOOTLOADER_ALLOW_DISCARDS"
+                ;;
+            "systemd" )
+                if [ "$DEVICE_TRIM" == "true" ]; then
+                    BOOTLOADER_ALLOW_DISCARDS=" rd.luks.options=discard"
+                fi
+                CMDLINE_LINUX="rd.luks.name=$UUID_ROOT=$LUKS_DEVICE_NAME$BOOTLOADER_ALLOW_DISCARDS"
+                ;;
+        esac
     fi
     if [ "$FILE_SYSTEM_TYPE" == "btrfs" ]; then
         CMDLINE_LINUX="$CMDLINE_LINUX rootflags=subvol=root"
@@ -1181,6 +1230,8 @@ function bootloader() {
     if [ -n "$KERNELS_PARAMETERS" ]; then
         CMDLINE_LINUX="$CMDLINE_LINUX $KERNELS_PARAMETERS"
     fi
+
+    CMDLINE_LINUX=$(trim_variable "$CMDLINE_LINUX")
 
     case "$BOOTLOADER" in
         "grub" )
@@ -1349,7 +1400,6 @@ Exec = /usr/bin/bootctl update
 EOT
 
     SYSTEMD_MICROCODE=""
-    SYSTEMD_OPTIONS=""
 
     if [ "$VIRTUALBOX" != "true" ]; then
         if [ "$CPU_VENDOR" == "intel" ]; then
@@ -1360,17 +1410,13 @@ EOT
         fi
     fi
 
-    if [ -n "$LUKS_PASSWORD" ]; then
-       SYSTEMD_OPTIONS="luks.name=$UUID_ROOT=$LUKS_DEVICE_NAME luks.options=discard"
-    fi
-
     echo "title Arch Linux" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux.conf"
     echo "efi /vmlinuz-linux" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux.conf"
     if [ -n "$SYSTEMD_MICROCODE" ]; then
         echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux.conf"
     fi
     echo "initrd /initramfs-linux.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux.conf"
-    echo "options initrd=initramfs-linux.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux.conf"
+    echo "options initrd=initramfs-linux.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux.conf"
 
     echo "title Arch Linux (terminal)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-terminal.conf"
     echo "efi /vmlinuz-linux" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-terminal.conf"
@@ -1378,7 +1424,7 @@ EOT
         echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-terminal.conf"
     fi
     echo "initrd /initramfs-linux.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-terminal.conf"
-    echo "options initrd=initramfs-linux.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-terminal.conf"
+    echo "options initrd=initramfs-linux.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-terminal.conf"
 
     echo "title Arch Linux (fallback)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-fallback.conf"
     echo "efi /vmlinuz-linux" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-fallback.conf"
@@ -1386,7 +1432,7 @@ EOT
         echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-fallback.conf"
     fi
     echo "initrd /initramfs-linux-fallback.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-fallback.conf"
-    echo "options initrd=initramfs-linux-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-fallback.conf"
+    echo "options initrd=initramfs-linux-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-fallback.conf"
 
     if [[ $KERNELS =~ .*linux-lts.* ]]; then
         echo "title Arch Linux (lts)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts.conf"
@@ -1395,7 +1441,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts.conf"
         fi
         echo "initrd /initramfs-linux-lts.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts.conf"
-        echo "options initrd=initramfs-linux-lts.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts.conf"
+        echo "options initrd=initramfs-linux-lts.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts.conf"
 
         echo "title Arch Linux (lts, terminal)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-terminal.conf"
         echo "efi /vmlinuz-linux-lts" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-terminal.conf"
@@ -1403,7 +1449,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-terminal.conf"
         fi
         echo "initrd /initramfs-linux-lts.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-terminal.conf"
-        echo "options initrd=initramfs-linux-lts.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-terminal.conf"
+        echo "options initrd=initramfs-linux-lts.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-terminal.conf"
 
         echo "title Arch Linux (lts-fallback)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-fallback.conf"
         echo "efi /vmlinuz-linux-lts" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-fallback.conf"
@@ -1411,7 +1457,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-fallback.conf"
         fi
         echo "initrd /initramfs-linux-lts-fallback.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-fallback.conf"
-        echo "options initrd=initramfs-linux-lts-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-fallback.conf"
+        echo "options initrd=initramfs-linux-lts-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-lts-fallback.conf"
     fi
 
     if [[ $KERNELS =~ .*linux-hardened.* ]]; then
@@ -1421,7 +1467,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened.conf"
         fi
         echo "initrd /initramfs-linux-hardened.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened.conf"
-        echo "options initrd=initramfs-linux-hardened.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened.conf"
+        echo "options initrd=initramfs-linux-hardened.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened.conf"
 
         echo "title Arch Linux (hardened, terminal)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-terminal.conf"
         echo "efi /vmlinuz-linux-hardened" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-terminal.conf"
@@ -1429,7 +1475,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-terminal.conf"
         fi
         echo "initrd /initramfs-linux-hardened.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-terminal.conf"
-        echo "options initrd=initramfs-linux-hardened.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-terminal.conf"
+        echo "options initrd=initramfs-linux-hardened.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-terminal.conf"
 
         echo "title Arch Linux (hardened-fallback)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-fallback.conf"
         echo "efi /vmlinuz-linux-hardened" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-fallback.conf"
@@ -1437,7 +1483,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-fallback.conf"
         fi
         echo "initrd /initramfs-linux-hardened-fallback.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-fallback.conf"
-        echo "options initrd=initramfs-linux-hardened-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-fallback.conf"
+        echo "options initrd=initramfs-linux-hardened-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-hardened-fallback.conf"
     fi
 
     if [[ $KERNELS =~ .*linux-zen.* ]]; then
@@ -1447,7 +1493,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen.conf"
         fi
         echo "initrd /initramfs-linux-zen.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen.conf"
-        echo "options initrd=initramfs-linux-zen.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen.conf"
+        echo "options initrd=initramfs-linux-zen.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen.conf"
 
         echo "title Arch Linux (zen, terminal)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-terminal.conf"
         echo "efi /vmlinuz-linux-zen" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-terminal.conf"
@@ -1455,7 +1501,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-terminal.conf"
         fi
         echo "initrd /initramfs-linux-zen.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-terminal.conf"
-        echo "options initrd=initramfs-linux-zen.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-terminal.conf"
+        echo "options initrd=initramfs-linux-zen.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX systemd.unit=multi-user.target" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-terminal.conf"
 
         echo "title Arch Linux (zen-fallback)" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-fallback.conf"
         echo "efi /vmlinuz-linux-zen" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-fallback.conf"
@@ -1463,7 +1509,7 @@ EOT
             echo "initrd $SYSTEMD_MICROCODE" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-fallback.conf"
         fi
         echo "initrd /initramfs-linux-zen-fallback.img" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-fallback.conf"
-        echo "options initrd=initramfs-linux-zen-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX $SYSTEMD_OPTIONS" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-fallback.conf"
+        echo "options initrd=initramfs-linux-zen-fallback.img $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX" >> "/mnt$ESP_DIRECTORY/loader/entries/archlinux-zen-fallback.conf"
     fi
 
     if [ "$VIRTUALBOX" == "true" ]; then
@@ -1590,7 +1636,8 @@ function desktop_environment_i3_gaps() {
 }
 
 function desktop_environment_deepin() {
-    pacman_install "deepin deepin-extra"
+    pacman_install "deepin deepin-extra deepin-kwin xorg xorg-server"
+    arch-chroot /mnt sed -i 's/^#greeter-session=.*/greeter-session=lightdm-deepin-greeter/' /etc/lightdm/lightdm.conf
     arch-chroot /mnt systemctl enable lightdm.service
 }
 
