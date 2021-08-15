@@ -136,9 +136,6 @@ function check_variables() {
         check_variables_value "PARTITION_CUSTOMMANUAL_BOOT" "$PARTITION_CUSTOMMANUAL_BOOT"
         check_variables_value "PARTITION_CUSTOMMANUAL_ROOT" "$PARTITION_CUSTOMMANUAL_ROOT"
     fi
-    if [ "$LVM" == "true" ]; then
-        check_variables_list "PARTITION_MODE" "$PARTITION_MODE" "auto" "true"
-    fi
     check_variables_equals "WIFI_KEY" "WIFI_KEY_RETYPE" "$WIFI_KEY" "$WIFI_KEY_RETYPE"
     check_variables_value "PING_HOSTNAME" "$PING_HOSTNAME"
     check_variables_value "PACMAN_MIRROR" "$PACMAN_MIRROR"
@@ -350,21 +347,19 @@ function prepare_partition() {
     if [ $? == 0 ]; then
         umount /mnt
     fi
-    if [ -e "/dev/mapper/$LVM_VOLUME_GROUP-$LVM_VOLUME_LOGICAL" ]; then
-        if [ -e "/dev/mapper/$LUKS_DEVICE_NAME" ]; then
-            DEVICE_LVM="/dev/mapper/$LUKS_DEVICE_NAME"
-        else
-            DEVICE_LVM="$DEVICE_ROOT"
-        fi
-        lvchange -an "$LVM_VOLUME_GROUP/$LVM_VOLUME_LOGICAL"
-        lvremove $LVM_VOLUME_GROUP
-        vgchange -an $LVM_VOLUME_GROUP
-        vgremove $LVM_VOLUME_GROUP
-        pvremove $DEVICE_LVM
-    fi
-    cryptsetup status "/dev/mapper/$LUKS_DEVICE_NAME" | grep -qi "is active"
+    lvs $LVM_VOLUME_GROUP-$LVM_VOLUME_LOGICAL
     if [ $? == 0 ]; then
-        cryptsetup close "/dev/mapper/$LUKS_DEVICE_NAME"
+        lvchange -an "$LVM_VOLUME_GROUP/$LVM_VOLUME_LOGICAL"
+    fi
+    vgs $LVM_VOLUME_GROUP
+    if [ $? == 0 ]; then
+        vgchange -an $LVM_VOLUME_GROUP
+    fi
+    if [ -e "/dev/mapper/$LUKS_DEVICE_NAME" ]; then
+        cryptsetup status $LUKS_DEVICE_NAME | grep -qi "is active"
+        if [ $? == 0 ]; then
+            cryptsetup close $LUKS_DEVICE_NAME
+        fi
     fi
     set -e
 }
@@ -549,7 +544,6 @@ function partition() {
         wipefs -a -f $DEVICE
         partprobe -s $DEVICE
     fi
-
     if [ "$PARTITION_MODE" == "auto" -o "$PARTITION_MODE" == "custom" ]; then
         if [ "$BIOS_TYPE" == "uefi" ]; then
             parted -s $DEVICE $PARTITION_PARTED_UEFI
@@ -581,9 +575,26 @@ function partition() {
             DEVICE_LVM="$DEVICE_ROOT"
         fi
 
-        pvcreate $DEVICE_LVM
-        vgcreate $LVM_VOLUME_GROUP $DEVICE_LVM
-        lvcreate -l 100%FREE -n $LVM_VOLUME_LOGICAL $LVM_VOLUME_GROUP
+        if [ "$PARTITION_MODE" == "auto" ]; then
+            set +e
+            lvs $LVM_VOLUME_GROUP-$LVM_VOLUME_LOGICAL
+            if [ $? == 0 ]; then
+                lvremove -y $LVM_VOLUME_GROUP/$LVM_VOLUME_LOGICAL
+            fi
+            vgs $LVM_VOLUME_GROUP
+            if [ $? == 0 ]; then
+                vgremove -y $LVM_VOLUME_GROUP
+            fi
+            pvs $DEVICE_LVM
+            if [ $? == 0 ]; then
+                pvremove -y $LVM_DEVICE
+            fi
+            set -e
+
+            pvcreate -y $DEVICE_LVM
+            vgcreate -y $LVM_VOLUME_GROUP $DEVICE_LVM
+            lvcreate -y -l 100%FREE -n $LVM_VOLUME_LOGICAL $LVM_VOLUME_GROUP
+        fi
     fi
 
     if [ -n "$LUKS_PASSWORD" ]; then
@@ -930,39 +941,39 @@ function display_driver() {
     if [ "$VULKAN" == "true" ]; then
         case "$DISPLAY_DRIVER" in
             "intel" )
-                PACKAGES_VULKAN="vulkan-icd-loader vulkan-intel"
-                PACKAGES_VULKAN_MULTILIB="lib32-vulkan-icd-loader lib32-vulkan-intel"
+                PACKAGES_VULKAN="vulkan-intel vulkan-icd-loader"
+                PACKAGES_VULKAN_MULTILIB="lib32-vulkan-intel lib32-vulkan-icd-loader"
                 ;;
             "amdgpu" )
-                PACKAGES_VULKAN="vulkan-radeon"
-                PACKAGES_VULKAN_MULTILIB="lib32-vulkan-radeon"
+                PACKAGES_VULKAN="vulkan-radeon vulkan-icd-loader"
+                PACKAGES_VULKAN_MULTILIB="lib32-vulkan-radeon lib32-vulkan-icd-loader"
                 ;;
             "ati" )
-                PACKAGES_VULKAN="vulkan-radeon"
-                PACKAGES_VULKAN_MULTILIB="lib32-vulkan-radeon"
+                PACKAGES_VULKAN="vulkan-radeon vulkan-icd-loader"
+                PACKAGES_VULKAN_MULTILIB="lib32-vulkan-radeon lib32-vulkan-icd-loader"
                 ;;
             "nvidia" )
-                PACKAGES_VULKAN="nvidia-utils"
-                PACKAGES_VULKAN_MULTILIB="lib32-nvidia-utils"
+                PACKAGES_VULKAN="nvidia-utils vulkan-icd-loader"
+                PACKAGES_VULKAN_MULTILIB="lib32-nvidia-utils lib32-vulkan-icd-loader"
                 ;;
             "nvidia-lts" )
-                PACKAGES_VULKAN="nvidia-utils"
-                PACKAGES_VULKAN_MULTILIB="lib32-nvidia-utils"
+                PACKAGES_VULKAN="nvidia-utils vulkan-icd-loader"
+                PACKAGES_VULKAN_MULTILIB="lib32-nvidia-utils lib32-vulkan-icd-loader"
                 ;;
             "nvidia-dkms" )
-                PACKAGES_VULKAN="nvidia-utils"
-                PACKAGES_VULKAN_MULTILIB="lib32-nvidia-utils"
+                PACKAGES_VULKAN="nvidia-utils vulkan-icd-loader"
+                PACKAGES_VULKAN_MULTILIB="lib32-nvidia-utils lib32-vulkan-icd-loader"
                 ;;
             "nvidia-390xx" )
-                PACKAGES_VULKAN="nvidia-utils"
+                PACKAGES_VULKAN="nvidia-utils vulkan-icd-loader"
                 PACKAGES_VULKAN_MULTILIB=""
                 ;;
             "nvidia-390xx-lts" )
-                PACKAGES_VULKAN="nvidia-utils"
+                PACKAGES_VULKAN="nvidia-utils vulkan-icd-loader"
                 PACKAGES_VULKAN_MULTILIB=""
                 ;;
             "nvidia-390xx-dkms" )
-                PACKAGES_VULKAN="nvidia-utils"
+                PACKAGES_VULKAN="nvidia-utils vulkan-icd-loader"
                 PACKAGES_VULKAN_MULTILIB=""
                 ;;
             "nouveau" )
@@ -1601,7 +1612,7 @@ function desktop_environment_gnome() {
 }
 
 function desktop_environment_kde() {
-    pacman_install "plasma-meta plasma-wayland-session kde-applications-meta"
+    pacman_install "plasma-meta plasma-wayland-session kde-system-meta kde-utilities-meta kde-graphics-meta kde-multimedia-meta kde-network-meta"
     arch-chroot /mnt systemctl enable sddm.service
 }
 
